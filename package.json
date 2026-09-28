@@ -40,7 +40,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/ankitsharma97/atomic-saga"
+    "url": "git+https://github.com/ankitsharma97/atomic-saga.git"
   },
   "bugs": {
     "url": "https://github.com/ankitsharma97/atomic-saga/issues"
