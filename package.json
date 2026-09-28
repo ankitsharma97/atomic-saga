@@ -1,29 +1,39 @@
 {
   "name": "atomic-saga",
-  "version": "1.0.2",
-  "description": "A comprehensive npm package for ensuring atomic API operations in distributed Node.js applications using Saga patterns, compensating transactions, and idempotent operations",
+  "version": "2.0.0",
+  "description": "All-or-nothing operations for distributed Node.js apps: sagas with compensation and crash recovery, idempotent HTTP endpoints, and a transactional outbox. Postgres and in-memory stores included.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "sideEffects": false,
   "scripts": {
-    "build": "npx tsc",
-    "dev": "npx tsc --watch",
-    "test": "npx jest",
-    "test:watch": "npx jest --watch",
-    "lint": "npx eslint src/**/*.ts",
-    "lint:fix": "npx eslint src/**/*.ts --fix",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsc -p tsconfig.build.json --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "jest",
+    "test:pg": "DATABASE_URL=${DATABASE_URL:-postgres://localhost/atomic_saga_test} jest",
+    "test:watch": "jest --watch",
+    "lint": "eslint \"src/**/*.ts\" \"test/**/*.ts\"",
+    "lint:fix": "eslint \"src/**/*.ts\" \"test/**/*.ts\" --fix",
     "clean": "rm -rf dist",
-    "prepublishOnly": "npm run clean && npm run build && npm run test"
+    "prepublishOnly": "npm run clean && npm run typecheck && npm run lint && npm test && npm run build"
   },
   "keywords": [
-    "distributed-transactions",
+    "saga",
     "saga-pattern",
-    "atomic-operations",
-    "microservices",
+    "distributed-transactions",
     "compensating-transactions",
-    "idempotent-apis",
+    "idempotency",
+    "idempotency-key",
     "transactional-outbox",
-    "event-sourcing",
-    "nodejs",
+    "outbox",
+    "postgres",
+    "microservices",
     "typescript"
   ],
   "author": "Ankit Sharma",
@@ -36,27 +46,29 @@
     "url": "https://github.com/ankitsharma97/atomic-saga/issues"
   },
   "homepage": "https://github.com/ankitsharma97/atomic-saga#readme",
-  "dependencies": {
-    "joi": "^17.11.0",
-    "uuid": "^9.0.0",
-    "winston": "^3.11.0"
+  "engines": {
+    "node": ">=18"
+  },
+  "peerDependencies": {
+    "pg": ">=8"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
   },
   "devDependencies": {
-    "@types/express": "^5.0.3",
+    "@types/express": "^4.17.25",
     "@types/jest": "^29.5.0",
     "@types/node": "^20.19.9",
-    "@types/uuid": "^9.0.8",
+    "@types/pg": "^8.23.1",
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.45.0",
+    "express": "^4.22.3",
     "jest": "^29.6.0",
+    "pg": "^8.23.0",
     "ts-jest": "^29.1.0",
     "typescript": "^5.8.3"
-  },
-  "peerDependencies": {
-    "express": "^4.18.0"
-  },
-  "engines": {
-    "node": ">=16.0.0"
   }
 }
