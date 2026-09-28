@@ -1,413 +1,296 @@
 # atomic-saga
 
-### ✨ Implement rock-solid, distributed transactions in Node.js with confidence.
+**All-or-nothing operations for distributed Node.js apps — on the Postgres you already have.**
 
-[](https://www.google.com/search?q=https://www.npmjs.com/package/atomic-saga)
-[](https://www.google.com/search?q=https://travis-ci.com/ankitsharma97/atomic-saga)
-[](https://www.google.com/search?q=https://github.com/ankitsharma97/atomic-saga/blob/main/LICENSE)
-[](https://www.google.com/search?q=https://www.npmjs.com/package/atomic-saga)
+One API request often has to change several systems: charge a card, reserve stock, write an order, emit an event. There is no database transaction spanning all of them, so a failure halfway leaves them disagreeing. `atomic-saga` gives you the three standard tools for this, built to survive the failure cases, with no extra infrastructure:
 
-Building reliable applications with microservices is hard. How do you handle a business transaction that spans multiple services, like processing a payment, updating inventory, and sending a confirmation email? If one step fails, how do you prevent leaving your system in an inconsistent state?
+| Problem | Tool |
+|---|---|
+| A later step fails after earlier ones succeeded | **`SagaOrchestrator`** — runs steps in order; on failure runs each completed step's compensation in reverse. Persists every transition, and **recovers executions interrupted by crashes** on any worker. |
+| A client retries and the work runs twice | **`IdempotencyMiddleware`** — Stripe-style `Idempotency-Key` handling: the stored response is **replayed**, concurrent duplicates get 409, reusing a key for a different request gets 422. |
+| The DB write commits but the event is lost (or vice versa) | **`TransactionalOutbox`** — the event is written **in your database transaction**; a background publisher delivers it with retries. |
 
-**`atomic-saga`** provides a complete, production-ready toolkit to solve these challenges using proven architectural patterns. It empowers you to build resilient and reliable distributed systems on Node.js.
-
-## 🤔 Why `atomic-saga`?
-
-  - ✅ **Production-Ready Patterns**: Implements the Saga, Transactional Outbox, and Idempotency patterns right out of the box, saving you from building complex infrastructure from scratch.
-  - 👨‍💻 **Developer-Friendly API**: A clean, fluent, and strongly-typed API makes defining, executing, and monitoring complex workflows straightforward.
-  - 🧩 **Flexible & Extensible**: Bring your own storage and messaging systems. The package provides interfaces for databases (PostgreSQL, MongoDB) and message brokers (Kafka, RabbitMQ), allowing you to integrate with your existing stack.
-  - 🛡️ **Built for Reliability**: With features like automatic rollbacks (compensations), configurable retries, and atomic event publishing, you can handle failures gracefully and ensure data consistency across services.
-
-## 📖 Table of Contents
-
-  - [Features](https://www.google.com/search?q=%23-features)
-  - [Installation](https://www.google.com/search?q=%23-installation)
-  - [Quick Start](https://www.google.com/search?q=%23-quick-start)
-  - [Core Concepts](https://www.google.com/search?q=%23-core-concepts)
-      - [Saga Pattern (Orchestration)](https://www.google.com/search?q=%23saga-pattern-orchestration)
-      - [Compensating Transactions](https://www.google.com/search?q=%23compensating-transactions)
-      - [Transactional Outbox](https://www.google.com/search?q=%23transactional-outbox-pattern)
-  - [API Usage](https://www.google.com/search?q=%23-api-usage)
-      - [Idempotent APIs](https://www.google.com/search?q=%23-idempotent-apis)
-      - [Transactional Outbox](https://www.google.com/search?q=%23-transactional-outbox)
-  - [Configuration](https://www.google.com/search?q=%23-configuration)
-  - [Monitoring & Observability](https://www.google.com/search?q=%23-monitoring--observability)
-  - [Store Implementations](https://www.google.com/search?q=%23%EF%B8%8F-store-implementations)
-  - [Testing](https://www.google.com/search?q=%23-testing)
-  - [Best Practices](https://www.google.com/search?q=%23-best-practices)
-  - [Contributing](https://www.google.com/search?q=%23-contributing)
-  - [License](https://www.google.com/search?q=%23-license)
-
-## ✨ Features
-
-  - **Saga Orchestration**: Define, execute, and monitor complex business workflows as a sequence of steps.
-  - **Automatic Compensation**: If any step fails, the Saga automatically runs compensating actions to roll back previous steps.
-  - **Configurable Retries**: Robust retry policies with exponential backoff for transient failures.
-  - **Idempotent API Middleware**: A simple Express middleware to make your API endpoints idempotent, preventing duplicate operations.
-  - **Transactional Outbox**: Guarantees that events are published if and only if the corresponding database transaction succeeds.
-  - **Reliable Event Delivery**: A background processor ensures outbox messages are reliably delivered to your message broker.
-  - **Full TypeScript Support**: Strongly typed from end to end for superior developer experience and fewer runtime errors.
-
-## 📦 Installation
+Stores for **PostgreSQL** (multi-worker safe, `FOR UPDATE SKIP LOCKED`) and **in-memory** (tests, single process) are included. Zero runtime dependencies.
 
 ```bash
-npm install atomic-saga
+npm install atomic-saga pg
 ```
 
-## 🚀 Quick Start
+Requires Node.js 18+. `pg` is only needed for the Postgres stores.
 
-### 1\. Initialization
+---
 
-First, create an instance of `AtomicApiOperations` with your chosen storage and logging implementations. For development, you can use the provided in-memory stores.
+## Contents
 
-```typescript
-import { AtomicApiOperations, InMemoryIdempotencyStore, InMemorySagaStore } from 'atomic-saga';
+- [Quick start](#quick-start)
+- [Sagas](#sagas)
+- [Idempotent endpoints](#idempotent-endpoints)
+- [Transactional outbox](#transactional-outbox)
+- [Stores](#stores)
+- [Guarantees and limits](#guarantees-and-limits)
+- [API reference](#api-reference)
+- [Migrating from 1.x](#migrating-from-1x)
 
-// Use your preferred logger (e.g., Winston)
-const logger = console; 
+## Quick start
 
-// Configure the package with storage implementations
-const atomicApi = new AtomicApiOperations({
-  idempotencyStore: new InMemoryIdempotencyStore(),
-  sagaStore: new InMemorySagaStore(),
-  logger: logger
-});
-```
+```ts
+import { Pool } from 'pg';
+import { SagaOrchestrator, PostgresSagaStore, migrate, NonRetryableError } from 'atomic-saga';
 
-### 2\. Define a Saga
+const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+await migrate(pool); // creates saga_executions, idempotency_keys, outbox_events (idempotent)
 
-Define the steps of your business transaction. Each step has an `action` to perform the work and an optional `compensation` to undo it.
-
-```typescript
-import { SagaDefinition } from 'atomic-saga';
-
-const paymentSaga: SagaDefinition = {
-  id: 'payment-processing',
-  name: 'Payment Processing Saga',
+const checkout = {
+  id: 'checkout',
+  name: 'Checkout',
   steps: [
     {
-      id: 'deduct-payment',
-      name: 'Deduct Payment from Account',
-      action: async (context) => {
-        // 1. Call your payment service
-        const result = await paymentService.deduct(context.amount, context.userId);
-        return { transactionId: result.id }; // Pass output to the next step or compensation
-      },
-      compensation: async (context, actionOutput) => {
-        // 1a. If a later step fails, refund the payment
-        await paymentService.refund(actionOutput.transactionId);
-      },
-      retryPolicy: { maxAttempts: 3, backoffMs: 1000, backoffMultiplier: 2 }
+      id: 'reserve-stock',
+      name: 'Reserve stock',
+      action: (ctx, meta) => inventory.reserve(ctx.sku, ctx.qty, { idempotencyKey: meta.idempotencyKey }),
+      compensation: (ctx, reservation) => inventory.release(reservation.id)
     },
     {
-      id: 'update-inventory',
-      name: 'Update Inventory',
-      action: async (context) => {
-        // 2. Call your inventory service
-        await inventoryService.reserve(context.productId, context.quantity);
-        return { inventoryReserved: true };
+      id: 'charge-card',
+      name: 'Charge card',
+      action: async (ctx, meta) => {
+        const charge = await payments.charge(ctx.amount, { idempotencyKey: meta.idempotencyKey });
+        if (charge.declined) throw new NonRetryableError('Card declined'); // fail now, don't retry
+        return charge;
       },
-      compensation: async (context) => {
-        // 2a. Release the inventory reservation
-        await inventoryService.release(context.productId, context.quantity);
-      }
+      compensation: (ctx, charge) => payments.refund(charge.id)
     },
     {
-      id: 'send-confirmation',
-      name: 'Send Confirmation Email',
-      action: async (context) => {
-        // 3. Send a confirmation email
-        await emailService.sendConfirmation(context.userId, context.orderId);
-        return { emailSent: true };
-      }
-      // No compensation needed, as we usually don't "un-send" an email.
+      id: 'create-order',
+      name: 'Create order',
+      action: (ctx, meta) => orders.create(ctx.orderId, meta.results['charge-card'])
     }
-  ],
-  onSuccess: async (context) => {
-    logger.log(`Saga [${paymentSaga.id}] completed successfully for order ${context.orderId}.`);
-  },
-  onFailure: async (context, error) => {
-    logger.error(`Saga [${paymentSaga.id}] failed for order ${context.orderId}:`, error);
-  }
+  ]
 };
+
+const sagas = new SagaOrchestrator(new PostgresSagaStore(pool));
+sagas.register(checkout);
+sagas.startRecovery(); // finish executions left behind by crashed workers
+
+const execution = await sagas.executeSaga(checkout, { orderId: 'o1', sku: 'sku-1', qty: 2, amount: 50 });
+execution.status; // 'COMPLETED' | 'COMPENSATED' | 'COMPENSATION_FAILED'
 ```
 
-### 3\. Execute the Saga
+A complete service — Express endpoint, idempotency, saga and outbox, all on Postgres — is in [`examples/checkout.ts`](examples/checkout.ts).
 
-Run the Saga with the required initial data. The orchestrator will manage the entire flow.
+## Sagas
 
-```typescript
-async function processOrder() {
-  const executionContext = {
-    amount: 100.00,
-    userId: 'user-123',
-    productId: 'prod-456',
-    quantity: 2,
-    orderId: 'order-789'
-  };
+### Steps
 
-  const result = await atomicApi.executeSaga(paymentSaga, executionContext);
-
-  console.log('Saga execution finished with status:', result.status); // e.g., 'COMPLETED' or 'COMPENSATED'
+```ts
+interface TransactionStep<TContext, TOutput> {
+  id: string;
+  name: string;
+  action(context: TContext, meta: StepMeta): Promise<TOutput>;
+  compensation?(context: TContext, output: TOutput | undefined, meta: StepMeta): Promise<void>;
+  retryPolicy?: RetryPolicy;             // default: 3 attempts, 1s backoff x2
+  compensationRetryPolicy?: RetryPolicy; // default: retryPolicy
+  timeout?: number;                      // per attempt, default 30s
 }
 ```
 
-## 🏗️ Core Concepts
+Every action and compensation receives `meta`:
 
-### Saga Pattern (Orchestration)
+| Field | Use |
+|---|---|
+| `idempotencyKey` | Stable per execution and step (`<executionId>:<stepId>`, `…:compensate` for compensations). **Pass it to downstream APIs** so a retried or recovered step does not repeat its side effect. |
+| `signal` | An `AbortSignal` aborted on timeout or when this worker loses ownership. Pass it to `fetch`, database drivers, etc. |
+| `results` | Outputs of the steps completed so far, keyed by step id. |
+| `attempt`, `executionId`, `sagaId`, `stepId` | For logging and tracing. |
 
-This package implements the **Saga Orchestration** pattern, where a central coordinator manages a distributed transaction.
+### What happens on failure
 
-1.  **Start**: A client requests to start a Saga.
-2.  **Execute Step**: The orchestrator executes the first step's `action`.
-3.  **Continue**: If the step succeeds, it moves to the next one.
-4.  **Failure & Compensation**: If any step fails, the orchestrator executes the `compensation` function for all previously completed steps, in reverse order.
-5.  **State Management**: The state of the Saga is persisted, allowing it to be resumed after a crash.
+1. The failing step is retried per its `retryPolicy`. Throw `NonRetryableError` (or use `retryPolicy.retryable`) to fail immediately.
+2. Compensations of the **completed** steps run in reverse order, each with its own retries. The failed step itself is not compensated. If it may have had a partial effect, make it clean up after itself.
+3. The saga ends as:
+   - `COMPENSATED` — everything was undone; `onFailure` is called.
+   - `COMPENSATION_FAILED` — at least one compensation kept failing. The other compensations still ran. The failing step is marked `COMPENSATION_FAILED` with its `compensationError`; `onCompensationFailed` is called. **This needs a human or a repair job** — it is never reported as success.
 
-### Compensating Transactions
+`executeSaga` resolves with the execution in all of these cases. It only rejects on infrastructure errors (store unavailable, ownership lost); the execution is then left active and `recover()` finishes it.
 
-A compensating transaction is an operation that semantically reverses the effect of a previous step. It's the key to achieving "all or nothing" behavior.
+Hooks (`onSuccess`, `onFailure`, `onCompensationFailed`) run after the outcome is persisted; if a hook throws, it is logged and the outcome is unchanged.
 
-  - **Action**: `paymentService.deduct(amount)`
-  - **Compensation**: `paymentService.refund(transactionId)`
+### Crash recovery
 
-Your compensation logic should be idempotent and designed to succeed even in failure scenarios.
+Every state change is persisted before the next one begins, and a running execution heartbeats. If a process dies (deploy, OOM, crash), its executions stop heartbeating; after `staleAfterMs` (default 60s) any worker's `recover()` can claim them — exactly one worker wins each claim — and drive them to a terminal state:
 
-### Transactional Outbox Pattern
+- **Interrupted while running steps** — by default (`recovery: 'resume'`) the interrupted step is re-run and the saga continues. This is why steps should be idempotent (use `meta.idempotencyKey`). Set `recovery: 'compensate'` on the definition to undo the completed steps instead.
+- **Interrupted while compensating** — the remaining compensations run; finished ones are not repeated.
+- **Definition changed since the execution started** (step ids no longer match) — the execution is compensated.
 
-This pattern ensures atomic updates between a database and a message broker. It prevents a common distributed system failure: the database commit succeeds, but the message to notify other services fails to send.
+A worker that was only paused (long GC, network partition) and finds its execution claimed by another stops at the next heartbeat: its step `signal` is aborted and `executeSaga` rejects with `LeaseLostError`. Writes are fenced by owner, so it cannot overwrite the new owner's progress.
 
-1.  **Atomic Operation**: The business data (e.g., `User` record) and the event (`UserUpdated` message) are saved to the database in the *same transaction*. The event is stored in a dedicated `outbox` table.
-2.  **Background Publisher**: A separate, reliable process polls the `outbox` table for unpublished events.
-3.  **Publish & Mark**: It publishes the events to a message broker (like Kafka or RabbitMQ) and, upon success, marks them as `published` in the database to prevent duplicates.
+```ts
+const sagas = new SagaOrchestrator(store, {
+  staleAfterMs: 60_000,      // silence before an execution is considered abandoned
+  heartbeatIntervalMs: 20_000,
+  workerId: process.env.HOSTNAME
+});
+sagas.register(checkout);    // a fresh process must register definitions before recovering them
+sagas.startRecovery();       // or call sagas.recover() from your own scheduler
+// on shutdown:
+await sagas.stopRecovery();
+```
 
-## 🔄 API Usage
+Context and step outputs are stored as JSON, so they must be JSON-serializable.
 
-### Idempotent APIs
+## Idempotent endpoints
 
-Protect your `POST` or `PUT` endpoints from duplicate requests caused by client retries or network issues.
-
-#### Express Middleware
-
-```typescript
+```ts
 import express from 'express';
-import { AtomicApiOperations } from 'atomic-saga';
+import { IdempotencyMiddleware, PostgresIdempotencyStore } from 'atomic-saga';
 
 const app = express();
-const atomicApi = new AtomicApiOperations(/* ... config ... */);
-
-// Add the middleware to your app.
-// It automatically checks for the 'X-Idempotency-Key' header.
-app.use(atomicApi.getIdempotencyMiddleware());
-
-app.post('/api/payments', async (req, res) => {
-  // This operation will now be idempotent. If a request with the same
-  // idempotency key arrives, the middleware will return the cached response.
-  const paymentResult = await processPayment(req.body);
-  res.json(paymentResult);
-});
+app.use(express.json()); // before the middleware: the body is part of the request fingerprint
+app.use(
+  new IdempotencyMiddleware(new PostgresIdempotencyStore(pool), {
+    required: false,                 // true: 400 when the header is missing
+    scope: req => req.user?.id,      // keys are per user
+    lockMs: 60_000,                  // longer than your slowest request
+    ttlMs: 24 * 60 * 60 * 1000
+  }).middleware()
+);
 ```
 
-#### Client Usage
+Clients send `Idempotency-Key: <uuid>` on POST/PATCH (configurable via `methods`). Then:
 
-The client must generate a unique key and send it in the header.
+| Situation | Response |
+|---|---|
+| First request with the key | Runs normally. The response (status, headers, body) is stored **before** it is sent. |
+| Retry, same request | The stored response, with `Idempotent-Replayed: true`. The handler does not run. |
+| Retry while the first is still running | `409` with `Retry-After`. |
+| Same key, different method, path or body | `422 idempotency_key_reused`. |
+| Handler responded `5xx`, or the connection dropped | Key released: the client can retry. (Customize with `shouldStore`.) |
+| Store unreachable | `503`, or pass-through with `failOpen: true`. |
 
-```typescript
-// Generate a unique key for the operation
-const idempotencyKey = atomicApi.generateIdempotencyKey(); // Or use a UUID library
+`Set-Cookie` and hop-by-hop headers are not replayed. Responses larger than `maxBodyBytes` (1 MiB) are not stored. The middleware uses only Node's `http` types, so it works with Express, Connect, or plain `http.createServer`.
 
-// Send the key in the request header
-await fetch('/api/payments', {
-  method: 'POST',
-  headers: {
-    'Content-Type': 'application/json',
-    'X-Idempotency-Key': idempotencyKey,
-  },
-  body: JSON.stringify(paymentData),
-});
-```
+Clean up expired keys periodically with `store.deleteExpired()`.
 
-### 📨 Transactional Outbox
+## Transactional outbox
 
-Use the outbox to atomically save data and publish an event.
+Write the event in the same transaction as the change it describes:
 
-```typescript
-// 1. Configure AtomicApiOperations with an OutboxStore and MessageBroker
-const atomicApi = new AtomicApiOperations({
-  // ... other stores
-  outboxStore: new PostgresOutboxStore(dbConnection),
-  messageBroker: new KafkaMessageBroker(kafkaClient),
+```ts
+import { TransactionalOutbox, PostgresOutboxStore, withTransaction } from 'atomic-saga';
+
+const outbox = new TransactionalOutbox(new PostgresOutboxStore(pool), {
+  publish: (topic, message) => kafka.send({ topic, messages: [{ key: message.eventId, value: JSON.stringify(message) }] })
 });
 
-// 2. Start the background processor (typically on app startup)
-atomicApi.startOutbox();
-
-// 3. Use it in your business logic
-async function updateUser(userId: string, userData: any) {
-  // Get a transaction handle from the outbox
-  const outboxTransaction = atomicApi.createOutboxTransaction();
-
-  // Execute your database logic and define the event to be published
-  await outboxTransaction.execute(
-    // A function that contains your database updates
-    async (transactionalClient) => {
-      await database.updateUser(userId, userData, { client: transactionalClient });
-      await database.updateRelatedData(userId, { client: transactionalClient });
-    },
-    // The event to publish upon success
-    {
-      eventType: 'UserUpdated',
-      payload: { userId, ...userData }
-    }
-  );
-}
-```
-
-## 🔧 Configuration
-
-### `AtomicApiConfig`
-
-```typescript
-interface AtomicApiConfig {
-  idempotencyStore: IdempotencyStore;        // Required: Manages idempotency keys.
-  sagaStore: SagaStore;                      // Required: Persists Saga state.
-  outboxStore?: OutboxStore;                 // Optional: Required for Transactional Outbox.
-  messageBroker?: MessageBroker;             // Optional: Required for Transactional Outbox.
-  logger?: Logger;                           // Optional: For logging. Defaults to console.
-  defaultRetryPolicy?: RetryPolicy;          // Optional: Default retry policy for Saga steps.
-}
-```
-
-### `RetryPolicy`
-
-```typescript
-interface RetryPolicy {
-  maxAttempts: number;       // Maximum number of attempts for an action.
-  backoffMs: number;         // Initial delay in milliseconds.
-  backoffMultiplier: number; // Factor to multiply delay by for each retry (e.g., 2 for exponential).
-}
-```
-
-## 📊 Monitoring & Observability
-
-### Saga Execution Tracking
-
-```typescript
-// Get details of a specific Saga execution
-const execution = await atomicApi.getSagaExecution('execution-id-123');
-console.log('Execution Status:', execution.status);
-console.log('Step Results:', execution.stepResults);
-
-// List all completed executions for a specific Saga
-const executions = await atomicApi.listSagaExecutions({
-  sagaId: 'payment-processing', 
-  status: 'COMPLETED'
+await withTransaction(pool, async tx => {
+  await tx.query('UPDATE orders SET status = $1 WHERE id = $2', ['paid', orderId]);
+  await outbox.add({ eventType: 'OrderPaid', payload: { orderId } }, tx); // commits or rolls back with the UPDATE
 });
+
+outbox.start(); // background publisher
 ```
 
-### Outbox Statistics
+- Topics default to the event type in dot case (`OrderPaid` → `order.paid`); override per event with `topic` or globally with `topicFor`.
+- Several publishers can run at once; each event is claimed by one of them (`lockMs`, default 30s).
+- Failed publishes are retried with exponential backoff (default 10 attempts, up to 5 min apart), then marked `FAILED`. `PostgresOutboxStore#requeueFailed()` puts them back.
+- Pass your own `id` to make `add` idempotent.
+- `outbox.getStats()` returns pending / published / failed counts.
 
-```typescript
-const stats = await atomicApi.getOutboxStats();
-console.log('Pending Events:', stats.pending);
-console.log('Published Events:', stats.published);
-console.log('Failed Events:', stats.failed);
+Delivery is **at-least-once**: if the process dies after the broker accepted a message but before it was marked published, it is sent again. Consumers should dedupe on `eventId`.
+
+## Stores
+
+| | Saga | Idempotency | Outbox |
+|---|---|---|---|
+| PostgreSQL | `PostgresSagaStore` | `PostgresIdempotencyStore` | `PostgresOutboxStore` |
+| In-memory | `InMemorySagaStore` | `InMemoryIdempotencyStore` | `InMemoryOutboxStore` |
+
+**PostgreSQL** (9.5+): run `migrate(pool)` on startup, or get the DDL from `schemaSql()` for your migration tool. Table names are configurable (`migrate(pool, { outboxEvents: 'app.outbox' })` and `new PostgresOutboxStore(pool, { tableName: 'app.outbox' })`). Leases use the database clock, so app-server clock drift does not matter.
+
+**In-memory**: for tests and single-process apps. State is lost on restart, so there is no cross-process recovery. Values are round-tripped through JSON to behave like the real stores.
+
+**Your own database**: implement `SagaStore`, `IdempotencyStore` or `OutboxStore<TTx>` (see [`src/types`](src/types/index.ts)). The contracts that matter: `updateExecution`/`heartbeat` must be fenced by owner, and `claimStaleExecutions`, `begin` and `claimBatch` must be atomic across processes. The Postgres implementations are a reference.
+
+## Guarantees and limits
+
+What you get:
+
+- A saga either completes, or all completed steps' compensations run — including after a crash, as long as some worker runs `recover()`.
+- A failed compensation is surfaced as `COMPENSATION_FAILED`, never hidden.
+- An idempotency key runs its handler at most once while the stored response is retained (`ttlMs`), provided the request finishes within `lockMs`.
+- An outbox event is published if and only if its transaction committed (at least once).
+
+What you need to do:
+
+- **Make steps and compensations idempotent**, using `meta.idempotencyKey` with downstream APIs. Retries and recovery re-run them; that's what makes the guarantees possible.
+- **Treat compensations as business operations** (a refund, a release), not database rollbacks. Other systems may see intermediate states — sagas give eventual consistency, not isolation.
+- **Honor `meta.signal`** in long steps. A timed-out attempt that ignores it keeps running in the background while the retry starts.
+- **Alert on `COMPENSATION_FAILED`** and on outbox `FAILED` counts.
+
+When to use something else: if you need long-running workflows (days, human approvals, timers), fan-out/fan-in, or versioned workflow code, use a durable-execution engine such as Temporal, Restate or Inngest. `atomic-saga` is for request-scoped, multi-step operations where adding infrastructure isn't worth it.
+
+## API reference
+
+### `new SagaOrchestrator(store, options?)`
+
+| Option | Default | |
+|---|---|---|
+| `logger` | silent | `{ info, warn, error, debug }`; `ConsoleLogger` is included |
+| `defaultRetryPolicy` | `{ maxAttempts: 3, backoffMs: 1000, backoffMultiplier: 2 }` | also `maxBackoffMs`, `retryable(error)` |
+| `defaultTimeout` | `30000` | per attempt, ms |
+| `staleAfterMs` | `60000` | |
+| `heartbeatIntervalMs` | `staleAfterMs / 3` | |
+| `workerId` | `<hostname>:<pid>:<random>` | |
+
+Methods: `register(definition)`, `executeSaga(definition, context, { executionId? })`, `recover({ limit? })`, `startRecovery(intervalMs?)`, `stopRecovery()`, `getExecution(id)`, `listExecutions({ sagaId?, status?, limit? })`.
+
+### `new IdempotencyMiddleware(store, options?)`
+
+Options: `header` (`Idempotency-Key`), `methods` (`['POST', 'PATCH']`), `required` (`false`), `ttlMs` (24h), `lockMs` (60s), `scope(req)`, `shouldStore(status)` (`status < 500`), `maxBodyBytes` (1 MiB), `failOpen` (`false`), `logger`. Methods: `middleware()`, `generateKey()`.
+
+### `new TransactionalOutbox(store, broker, options?)`
+
+Options: `pollIntervalMs` (1000), `batchSize` (100), `lockMs` (30000), `retryPolicy` (10 attempts, 1s ×2, max 5 min), `topicFor(eventType)`, `logger`. Methods: `add(event, tx?)`, `start()`, `stop()`, `processNow()`, `getStats()`.
+
+### `AtomicApiOperations`
+
+A small facade that wires the three together:
+
+```ts
+const atomic = new AtomicApiOperations({ sagaStore, idempotencyStore, outboxStore, messageBroker });
+app.use(atomic.idempotencyMiddleware());
+atomic.register(checkout).start();   // recovery + outbox publisher
+await atomic.executeSaga(checkout, ctx);
+await atomic.stop();
 ```
 
-## 🛠️ Store Implementations
+### Errors
 
-The package is unopinionated about your data storage. You provide the implementation by conforming to these interfaces. Example implementations for popular databases are planned for the future.
+`NonRetryableError` (throw from a step to skip retries), `StepTimeoutError`, `LeaseLostError`.
 
-  - **`IdempotencyStore`**:
-      - `set(key, response)`
-      - `get(key)`
-      - *Recommended Backend: Redis (for its speed and TTL support)*
-  - **`SagaStore`**:
-      - `createExecution(data)`
-      - `getExecution(id)`
-      - `updateExecution(id, data)`
-      - *Recommended Backend: PostgreSQL, MongoDB*
-  - **`OutboxStore`**:
-      - `add(event, transaction)`
-      - `getUnpublished()`
-      - `markAsPublished(eventId)`
-      - *Recommended Backend: PostgreSQL, MongoDB*
+## Migrating from 1.x
 
-## 🧪 Testing
+2.0 is a breaking release. The 1.x idempotency middleware and outbox did not provide the guarantees they described (duplicates got a 409 instead of the original response; the outbox did not write inside the caller's transaction), and their store interfaces could not express the fix.
 
-The package is designed to be easily testable. Use the `InMemory` stores to test your Saga logic without external dependencies.
+- **Constructors take an options object**: `new SagaOrchestrator(store, { logger, defaultRetryPolicy, defaultTimeout })`, `new IdempotencyMiddleware(store, { logger, header })`, `new TransactionalOutbox(store, broker, { logger, pollIntervalMs })`.
+- **Step signatures** gained a `meta` argument; compensations receive the step's **output** as the second argument (as before) and the saga context as the first. Existing `action(context)` functions keep working.
+- **New statuses**: `COMPENSATION_FAILED` for sagas and steps. `execution.error` / `stepResult.error` are plain `{ name, message, stack }` objects.
+- **`listExecutions(sagaId, status)`** → `listExecutions({ sagaId, status })`.
+- **Store interfaces changed.** Use the bundled stores, or see [Stores](#stores) for the new contracts: `SagaStore` gained `heartbeat` and `claimStaleExecutions`, and `updateExecution` returns whether the write happened; `IdempotencyStore` is now `begin` / `complete` / `release`; `OutboxStore` is now `saveEvent(event, tx)` / `claimBatch` / `markPublished` / `markRetry` / `markFailed` / `getStats`.
+- **Idempotency header** defaults to `Idempotency-Key` (was `X-Idempotency-Key`); pass `{ header: 'X-Idempotency-Key' }` to keep the old one.
+- **Outbox**: `storeEvent(sagaId, stepId, type, payload)` → `add({ eventType, payload, metadata }, tx)`. `OutboxTransaction` was removed; use `withTransaction` (or your own transaction) and pass `tx`. `MessageBroker` only needs `publish`.
+- **Removed**: `utils`, the no-op `@Idempotent` decorator, and the `joi`, `winston`, `uuid` and `express` dependencies. Node 18+ is required.
 
-```typescript
-import { AtomicApiOperations, InMemorySagaStore, InMemoryIdempotencyStore } from 'atomic-saga';
+## Development
 
-describe('Payment Saga', () => {
-  let atomicApi: AtomicApiOperations;
-  let mockPaymentService;
-
-  beforeEach(() => {
-    atomicApi = new AtomicApiOperations({
-      idempotencyStore: new InMemoryIdempotencyStore(),
-      sagaStore: new InMemorySagaStore(),
-    });
-
-    // Mock external services
-    mockPaymentService = {
-      deduct: jest.fn().mockResolvedValue({ id: 'txn-123' }),
-      refund: jest.fn().mockResolvedValue(true),
-    };
-  });
-
-  it('should complete successfully when all steps succeed', async () => {
-    // ... setup mocks to succeed
-    const result = await atomicApi.executeSaga(paymentSaga, paymentContext);
-    expect(result.status).toBe('COMPLETED');
-    expect(mockPaymentService.refund).not.toHaveBeenCalled();
-  });
-
-  it('should compensate successfully when a step fails', async () => {
-    // Mock the inventory service to throw an error
-    mockInventoryService.reserve.mockRejectedValue(new Error('Inventory not available'));
-
-    const result = await atomicApi.executeSaga(paymentSaga, paymentContext);
-    
-    expect(result.status).toBe('COMPENSATED');
-    expect(mockPaymentService.refund).toHaveBeenCalledWith('txn-123');
-  });
-});
+```bash
+npm install
+npm test                                  # unit tests (in-memory)
+createdb atomic_saga_test && npm run test:pg   # plus Postgres integration tests
+npm run lint && npm run typecheck
 ```
 
-## 🔒 Best Practices
+## License
 
-  - **Design Idempotent Compensations**: Your compensation logic might be retried. Ensure it can be run multiple times without causing issues (e.g., don't refund twice).
-  - **Keep Steps Small and Focused**: Each step should ideally interact with a single service or transactional boundary.
-  - **Avoid Business Logic in the Orchestrator**: The Saga definition should only coordinate the steps. The actual business logic belongs in your services.
-  - **Monitor for Failed Compensations**: A failed compensation is a critical error that requires manual intervention. Set up alerts to detect these scenarios.
-
-## 🤝 Contributing
-
-Contributions are welcome\! Please feel free to fork the repository, create a feature branch, and submit a pull request.
-
-1.  Fork the repository.
-2.  Create your feature branch (`git checkout -b feature/amazing-feature`).
-3.  Commit your changes (`git commit -m 'Add some amazing feature'`).
-4.  Push to the branch (`git push origin feature/amazing-feature`).
-5.  Open a pull request.
-
-## 🙏 Acknowledgments
-
-This package is heavily inspired by the patterns and principles from giants in the field:
-
-  - "Saga" by Hector Garcia-Molina and Kenneth Salem
-  - "Patterns of Enterprise Application Architecture" by Martin Fowler
-  - "Building Microservices" by Sam Newman
-
-## 📄 License
-
-This project is licensed under the MIT License - see the [LICENSE](https://www.google.com/search?q=LICENSE) file for details.
-
------
-For questions, issues, or contributions:
-  "description": "A comprehensive npm package for ensuring atomic API operations in distributed Node.js applications using Saga patterns, compensating transactions, and idempotent operations",
-- GitHub Issues: [Create an issue](https://github.com/ankitsharma97/atomic-saga/issues)
-- Documentation: [Read the docs](https://github.com/ankitsharma97/atomic-saga/wiki)
-- Examples: [View examples](https://github.com/ankitsharma97/atomic-sagag/examples) 
+MIT

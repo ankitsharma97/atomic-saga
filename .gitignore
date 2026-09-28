@@ -1,11 +1,6 @@
-./node_modules
-./dist
-./build
-./coverage
-./logs
-./temp
-./tmp
-./cache
-./backup
-./archive
-
+node_modules/
+dist/
+coverage/
+*.tgz
+.DS_Store
+.env
